@@ -17,6 +17,7 @@ import socket
 import fcntl
 import struct
 import StringIO
+import uuid
 
 
 # Logging Initialization
@@ -249,7 +250,7 @@ def seeds_file_func(ethadapter):
         sys.exit()
 
 
-def prepare_data_disk_func(disks):
+def prepare_data_disk_func(disks, data_image_file):
     """
     Prepare the data disk for usage. This includes format, and mount
     """
@@ -259,7 +260,10 @@ def prepare_data_disk_func(disks):
         # echo -e "o\nn\np\n1\n\n\nw" | fdisk /dev/sdc
 
         for index, disk in enumerate(disks):
-            disk_path = "/dev/{}".format(disk)
+            if not data_image_file:
+                disk_path = "/dev/{}".format(disk)
+            else:
+                disk_path = "/opt/ecs_data_drive/{}".format(disk)
 
             if "{}1".format(disk) in cmdline("fdisk -l"):
                 logger.fatal("Partitioned disk {} already mounted. Please unmount and re-initialize disk before retrying.".format(disk))
@@ -269,21 +273,25 @@ def prepare_data_disk_func(disks):
             ps = subprocess.Popen(["echo", "-e", "\"o\nn\np\n1\n\n\nw\""], stdout=subprocess.PIPE)
             output = subprocess.check_output(["fdisk", disk_path], stdin=ps.stdout)
             ps.wait()
-            # os.system("echo -e o\nn\np\n1\n\n\nw | fdisk /dev/sdc")
 
-            device_name = disk_path + "1"
+            if data_image_file:
+                device_name = disk_path
+            else:
+                device_name = disk_path + "1"
             # Make File Filesystem in attached Volume
             logger.info("Make File filesystem in '{}'".format(device_name))
             subprocess.call(["mkfs.xfs", "-f", device_name])
 
-            uuid_name = uuid_filename(device_name)
-            # mkdir -p /ecs/uuid-[uuid]
+            uuid_name = uuid_filename(device_name, data_image_file)
             logger.info("Make /ecs/{} Directory in attached Volume".format(uuid_name))
             subprocess.call(["mkdir", "-p", "/ecs/{}".format(uuid_name)])
 
             # mount /dev/sdc1 /ecs/uuid-[uuid]
             logger.info("Mount attached {} to /ecs/{} volume.".format(device_name, uuid_name))
-            subprocess.call(["mount", device_name, "/ecs/{}".format(uuid_name), "-o", "noatime,attr2,inode64,noquota"])
+            if data_image_file:
+                subprocess.call(["mount", device_name, "/ecs/{}".format(uuid_name), "-o", "loop,noatime,attr2,inode64,noquota"])
+            else:
+                subprocess.call(["mount", device_name, "/ecs/{}".format(uuid_name), "-o", "noatime,attr2,inode64,noquota"])
 
             # add entry to fstab if not pre-existing
             fstab = "/etc/fstab"
@@ -293,7 +301,11 @@ def prepare_data_disk_func(disks):
                 logger.info("Data disk already entered in fs table")
             elif p.returncode == 1:
                 with open("/etc/fstab", 'a') as file:
-                    file.write("{} /ecs/{} xfs rw,noatime,attr2,inode64,noquota 0 0\n".format(device_name, uuid_name) )
+                    if data_image_file:
+                        # here we add loop and the offset to the partition in the image file
+                        file.write("{} /ecs/{} xfs loop,rw,noatime,attr2,inode64,noquota 0 0\n".format(device_name, uuid_name))
+                    else:
+                        file.write("{} /ecs/{} xfs rw,noatime,attr2,inode64,noquota 0 0\n".format(device_name, uuid_name) )
             else:
                 logger.info("Error in checking filesystem table: {}".format(err))
 
@@ -302,22 +314,31 @@ def prepare_data_disk_func(disks):
         logger.fatal("Aborting program! Please review log.")
         sys.exit()
 
-def uuid_filename(device_name):
-    blkd_id_process = subprocess.Popen(["blkid", "-s", "UUID", "-o", "value", device_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout, stderr = blkd_id_process.communicate()
-    return "uuid-{}".format(stdout.strip())
+def uuid_filename(device_name, data_image_file):
+    if not data_image_file:
+        blkd_id_process = subprocess.Popen(["blkid", "-s", "UUID", "-o", "value", device_name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = blkd_id_process.communicate()
+        return "uuid-{}".format(stdout.strip())
+    else:
+        return "uuid-{}".format(uuid.uuid4())
 
 
-def run_additional_prep_file_func(disks):
+def run_additional_prep_file_func(disks, data_image_file):
     """
     Execute the additional preparation script
     """
 
     try:
-        prep_file_name = "./additional_prep.sh"
+        if not data_image_file:
+            prep_file_name = "./additional_prep.sh"
+        else:
+            prep_file_name = "./additional_prep_image.sh"
 
         for disk in disks:
-            device_name = "/dev/{}1".format(disk)
+            if not data_image_file:
+                device_name = "/dev/{}1".format(disk)
+            else:
+                device_name = "/opt/ecs_data_drive/{}".format(disk)
             # Gets the prep. file
             logger.info("Executing the additional preparation script in '{}'".format(device_name))
             subprocess.call([prep_file_name, device_name])
@@ -600,7 +621,7 @@ def docker_cleanup_old_images():
 
 
 
-def cleanup_installation(disks):
+def cleanup_installation(disks, data_image_file):
     """
     Clean the directory and files created by ECS. It un-mounts the drive and performs a directory cleanup
     """
@@ -609,7 +630,10 @@ def cleanup_installation(disks):
         logger.info("CleanUp Installation. Un-mount Drive and Delete Directories and Files from the Host")
 
         for index, disk in enumerate(disks):
-            disk_path = "/dev/{}".format(disk)
+            if not data_image_file:
+                disk_path = "/dev/{}".format(disk)
+            else:
+                disk_path = "/opt/ecs_data_drive/{}".format(disk)
 
             device_name = disk_path + "1"
             uuid_name = uuid_filename(device_name)
@@ -708,6 +732,9 @@ def main():
     parser.add_argument('--proxy', dest='proxy',nargs='?',
                         help='If present, use defined proxy to pull docker images and run docker',
                         required=False)
+    parser.add_argument('--data-drive-image', dest='data_image_file', action='store_true', default=False,
+                        help='If true, will create the data disk as an image file instead of physical disk device',
+                        required=False)
     parser.set_defaults(container_config=False)
     parser.set_defaults(cleanup=False)
     parser.set_defaults(imagename="emccorp/ecs-software-3.0.0")
@@ -751,25 +778,27 @@ def main():
         logger.info("Starting CleanUp: Removing Previous Docker containers and images. Deletes the created Directories.")
         subprocess.call(["service","docker","start"])
         docker_cleanup_old_images()
-        cleanup_installation(args.disks)
+        cleanup_installation(args.disks, args.data_image_file)
         sys.exit(7)
 
     # Check that the Selected Disks have not been initialized and can be used
     for disk in args.disks:
-        if not os.path.exists("/dev/{}".format(disk)):
-            print "Disk '/dev/{}' does not exist".format(disk)
-            sys.exit(4)
+        if not args.data_image_file:
+            if not os.path.exists("/dev/{}".format(disk)):
+                print "Disk '/dev/{}' does not exist".format(disk)
+                sys.exit(4)
+        else:
+            if not os.path.exists("/opt/ecs_data_drive/{}".format(disk)):
+                print "Disk '/opt/ecs_data_drive/{}' does not exist".format(disk)
+                print "To use data drive image mode, you need to first create a sparse\n" \
+                      "image file (dd if=/dev/zero of=my_sparse_file bs=1 count=0 seek=100G)\n" \
+                      "and place it in /opt/ecs_data_drive/"
+                sys.exit(4)
 
     if string.lower(args.hostname[0])=="localhost":
         logger.info("StartUp Check: Hostname can not be localhost")
         print "StartUp Check: Hostname can not be localhost"
         sys.exit(10)
-    # disk_ready = cmdline("fdisk -l /dev/{} | grep \"Disk label type:\"".format(disk))
-    #    if disk_ready:
-    #        print "Please check that Disk: {} is not formatted (fdisk -l).".format(disk)
-    #        sys.exit(5)
-    #    else:
-    #        print "Disk {} checked. Ready for the installation.".format(disk)
 
 
     # Step 1 : Configuration of Host Machine to run the ECS Docker Container
@@ -798,8 +827,8 @@ def main():
     hosts_file_func(args.hostname, ethernet_adapter_name)
     network_file_func(ethernet_adapter_name)
     seeds_file_func(ethernet_adapter_name)
-    prepare_data_disk_func(args.disks)
-    run_additional_prep_file_func(args.disks)
+    prepare_data_disk_func(args.disks, args.data_image_file)
+    run_additional_prep_file_func(args.disks, args.data_image_file)
     directory_files_conf_func()
     set_docker_configuration_func()
     if args.proxy:
