@@ -302,7 +302,6 @@ def prepare_data_disk_func(disks, data_image_file):
             elif p.returncode == 1:
                 with open("/etc/fstab", 'a') as file:
                     if data_image_file:
-                        # here we add loop and the offset to the partition in the image file
                         file.write("{} /ecs/{} xfs loop,rw,noatime,attr2,inode64,noquota 0 0\n".format(device_name, uuid_name))
                     else:
                         file.write("{} /ecs/{} xfs rw,noatime,attr2,inode64,noquota 0 0\n".format(device_name, uuid_name) )
@@ -791,8 +790,8 @@ def main():
             if not os.path.exists("/opt/ecs_data_drive/{}".format(disk)):
                 print "Disk '/opt/ecs_data_drive/{}' does not exist".format(disk)
                 print "To use data drive image mode, you need to first create a sparse\n" \
-                      "image file (dd if=/dev/zero of=my_sparse_file bs=1 count=0 seek=100G)\n" \
-                      "and place it in /opt/ecs_data_drive/"
+                      "image file (dd if=/dev/zero of=data-drive-1.img bs=1 count=0 seek=100G)\n" \
+                      "and make sure it is placed in /opt/ecs_data_drive/"
                 sys.exit(4)
 
     if string.lower(args.hostname[0])=="localhost":
